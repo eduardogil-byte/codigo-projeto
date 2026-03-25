@@ -11,10 +11,12 @@ img = redimensionar_imagem(img)
 img2 = redimensionar_imagem(img2)
 img3 = redimensionar_imagem(img3)
 
-img = detectar_pcb("",img)
+img = detectar_pcb("esp32.jpg",img)
 img2 = detectar_pcb("",img2)
 img3 = detectar_pcb("",img3)
 
+
+cv2.imshow("detectar PCB", img)
 
 
 test = comparar_pcb(img, img2, 50)
