@@ -3,21 +3,11 @@ import numpy as np
 import pandas as pd
 
 # =========================
-# DETECTAR PCB (POR COR)
+# DETECTAR PCB
 # =========================
-def detectar_pcb(caminho, varivale_extra=None):
-    if varivale_extra is not None:
-        img = varivale_extra
-    else:
-        img = cv2.imread(caminho)
-
-    if img is None:
-        print("Erro ao carregar imagem")
-        return None
-
+def detectar_pcb(img):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # azul da PCB
     lower_blue = np.array([90, 50, 50])
     upper_blue = np.array([140, 255, 255])
 
@@ -29,30 +19,12 @@ def detectar_pcb(caminho, varivale_extra=None):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
-        print("Nenhum contorno encontrado")
         return None
 
     cnt = max(contours, key=cv2.contourArea)
-
     x, y, w, h = cv2.boundingRect(cnt)
 
-    pcb = img[y:y+h, x:x+w]
-
-    # DEBUG visual
-    debug = img.copy()
-    cv2.rectangle(debug, (x,y), (x+w,y+h), (0,255,0), 3)
-    cv2.imshow("DETECCAO PCB", debug)
-
-    return pcb
-
-
-# =========================
-# REDIMENSIONAR
-# =========================
-def redimensionar_imagem(img, nova_largura=1024):
-    proporcao = float(nova_largura) / img.shape[1]
-    nova_altura = int(img.shape[0] * proporcao)
-    return cv2.resize(img, (nova_largura, nova_altura))
+    return img[y:y+h, x:x+w]
 
 
 # =========================
@@ -66,113 +38,127 @@ def carregar_componentes(csv_path):
         comps.append({
             "ref": row["Ref"],
             "x": float(row["PosX"]),
-            "y": float(row["PosY"])
+            "y": float(row["PosY"]),
+            "package": row["Package"],
+            "rot": float(row["Rot"])
         })
 
     return comps
 
 
 # =========================
-# ROI
+# PEGAR FIDUCIAIS
 # =========================
-def extrair_roi(img, comp, escala_x, escala_y, offset_x, offset_y, tamanho=20):
-    x = int(comp["x"] * escala_x + offset_x)
-    y = int(comp["y"] * escala_y + offset_y)
-
-    if x < 0 or y < 0 or x >= img.shape[1] or y >= img.shape[0]:
-        return None, x, y
-
-    roi = img[max(0, y-tamanho):y+tamanho, max(0, x-tamanho):x+tamanho]
-
-    return roi, x, y
+def pegar_fiduciais(comps):
+    return [c for c in comps if "FD" in c["ref"]]
 
 
 # =========================
-# DETECÇÃO DE PRESENÇA
+# TAMANHO POR PACKAGE (mm)
 # =========================
-def tem_componente(roi, limiar=20):
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    variacao = np.std(gray)
-    return variacao > limiar
+def tamanho_por_package(package):
+    tabela = {
+        "0603": (1.6, 0.8),
+        "0805": (2.0, 1.25),
+        "SOT-23": (3.0, 1.5),
+        "SOT223": (6.5, 3.5),
+        "MLF32": (7.0, 7.0),
+        "MSOP08": (3.0, 3.0),
+    }
+
+    for k in tabela:
+        if k in package:
+            return tabela[k]
+
+    return (2.0, 2.0)
+
+
+# =========================
+# DESENHAR COMPONENTE
+# =========================
+def desenhar(img, x, y, comp, escala_px_por_mm, cor):
+    w_mm, h_mm = tamanho_por_package(comp["package"])
+
+    w = int(w_mm * escala_px_por_mm) + 10
+    h = int(h_mm * escala_px_por_mm) + 10
+
+    angle = -comp["rot"]
+
+    rect = ((x, y), (w, h), angle)
+    box = cv2.boxPoints(rect)
+    box = np.int32(box)
+
+    cv2.polylines(img, [box], True, cor, 2)
+
+    cv2.putText(img, comp["ref"], (x-20, y-10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, cor, 1)
+
+
+# =========================
+# CLICK
+# =========================
+pontos_img = []
+
+def clicar(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        pontos_img.append([x, y])
+        print("Clique:", x, y)
 
 
 # =========================
 # MAIN
 # =========================
 def main():
-    img = cv2.imread("img.jpg")
+    img = cv2.imread("codigo-projeto/img2.jpeg")
 
-    if img is None:
-        print("Erro ao carregar imagem")
-        return
-
-    # Detecta PCB
-    pcb = detectar_pcb(None, img)
-
+    pcb = detectar_pcb(img)
     if pcb is None:
-        print("Nao encontrou PCB, usando imagem inteira")
         pcb = img
 
-    pcb = redimensionar_imagem(pcb)
+    componentes = carregar_componentes("codigo-projeto/coordenadas_uno_r3_smd.csv")
 
-    # CSV
-    componentes = carregar_componentes("coordenadas.csv")
+    # pega fiduciais
+    fid = pegar_fiduciais(componentes)
 
-    # =========================
-    # NORMALIZAÇÃO
-    # =========================
-    xs = [c["x"] for c in componentes]
-    ys = [c["y"] for c in componentes]
-
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-
-    h, w = pcb.shape[:2]
-
-    escala_x = w / (max_x - min_x)
-    escala_y = h / (max_y - min_y)
-
-    offset_x = -min_x * escala_x
-    offset_y = -min_y * escala_y
-
-    print("Escala:", escala_x, escala_y)
-    print("Offset:", offset_x, offset_y)
-
-    # =========================
-    # DEBUG FINAL
-    # =========================
-    debug = pcb.copy()
-
-    for comp in componentes[:200]:
-        roi, x, y = extrair_roi(
-            pcb, comp,
-            escala_x, escala_y,
-            offset_x, offset_y
-        )
-
-        if roi is None or roi.size == 0:
-            continue
-
-        existe = tem_componente(roi)
-
-        cor = (0,255,0) if existe else (0,0,255)
-
-        # quadrado
-        cv2.rectangle(debug, (x-20, y-20), (x+20, y+20), cor, 2)
-
-        # texto (REF)
-        cv2.putText(
-            debug,
-            comp["ref"],
-            (x - 20, y - 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.4,
-            cor,
-            1,
-            cv2.LINE_AA
-        )
+    print("Clique nos 3 fiduciais (FD1, FD2, FD3)")
 
     cv2.imshow("PCB", pcb)
+    cv2.setMouseCallback("PCB", clicar)
+    cv2.waitKey(0)
+
+    if len(pontos_img) < 3:
+        print("Precisa clicar 3 pontos")
+        return
+
+    pontos_img_np = np.array(pontos_img[:3], dtype=np.float32)
+
+    pontos_csv = np.array([[f["x"], f["y"]] for f in fid[:3]], dtype=np.float32)
+
+    # calcula homografia
+    H, _ = cv2.findHomography(pontos_csv, pontos_img_np)
+
+    debug = pcb.copy()
+
+    # escala aproximada (usada só para tamanho)
+    escala_px_por_mm = 5
+
+    for comp in componentes:
+
+        # ignorar coisas irrelevantes
+        if "TP" in comp["ref"] or "FRAME" in comp["ref"]:
+            continue
+
+        pt = np.array([[comp["x"], comp["y"], 1]]).T
+        dst = H @ pt
+
+        x = int(dst[0] / dst[2])
+        y = int(dst[1] / dst[2])
+
+        x = max(0, min(x, pcb.shape[1]-1))
+        y = max(0, min(y, pcb.shape[0]-1))
+
+        desenhar(debug, x, y, comp, escala_px_por_mm, (0,255,0))
+
     cv2.imshow("RESULTADO", debug)
     cv2.waitKey(0)
 
